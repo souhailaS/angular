@@ -17,14 +17,52 @@ defaults:
     shell: bash
 
 jobs:
-  lint:
+  # Shared setup job to reduce redundancy across jobs
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - name: Initialize environment
+        uses: angular/dev-infra/github-actions/npm/checkout-and-setup-node@6f54d143077baef582d70873722166fdc040066c
+        with:
+          cache-node-modules: true
+      - name: Cache workspace
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: yarn install --frozen-lockfile
+
+  # Combined lint, validation, and devtools job for faster execution
+  lint-validation-and-devtools:
+    needs: setup
     runs-on: ubuntu-latest
     steps:
       - name: Initialize environment
         uses: angular/dev-infra/github-actions/npm/checkout-and-setup-node@6f54d143077baef582d70873722166fdc040066c
         with:
           cache-node-modules: true
-      - name: Install node modules
+      - name: Setup Bazel
+        uses: angular/dev-infra/github-actions/bazel/setup@6f54d143077baef582d70873722166fdc040066c
+      - name: Setup Bazel RBE
+        uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
+        with:
+          google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (if cache miss)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile
       - name: Check code lint
         run: yarn -s tslint
@@ -36,28 +74,13 @@ jobs:
         run: yarn -s ng-dev ngbot verify
       - name: Confirm code builds with typescript as expected
         run: yarn -s check-tooling-setup
-
-  devtools:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Initialize environment
-        uses: angular/dev-infra/github-actions/npm/checkout-and-setup-node@6f54d143077baef582d70873722166fdc040066c
-        with:
-          cache-node-modules: true
-      - name: Setup Bazel
-        uses: angular/dev-infra/github-actions/bazel/setup@6f54d143077baef582d70873722166fdc040066c
-      - name: Setup Bazel RBE
-        uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
-        with:
-          google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
-      - name: Install node modules
-        run: yarn install --frozen-lockfile
-      - name: Run unit tests
+      - name: Run devtools unit tests
         run: yarn devtools:test
-      - name: Test build
+      - name: Test devtools build
         run: yarn devtools:build:chrome
 
   test:
+    needs: setup
     runs-on: ubuntu-latest-4core
     steps:
       - name: Initialize environment
@@ -70,12 +93,21 @@ jobs:
         uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
         with:
           google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (with timeout for large installs)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile --network-timeout 100000
       - name: Run CI tests for framework
         run: yarn test:ci
 
   integration-tests:
+    needs: setup
     runs-on: ubuntu-latest-4core
     steps:
       - name: Initialize environment
@@ -88,12 +120,21 @@ jobs:
         uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
         with:
           google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (with timeout for large installs)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile --network-timeout 100000
       - name: Run integration CI tests for framework
         run: yarn integration-tests:ci
 
   adev:
+    needs: setup
     runs-on:
       labels: ubuntu-latest-4core
     steps:
@@ -105,7 +146,15 @@ jobs:
         uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
         with:
           google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (if cache miss)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile
       - name: Run tests
         run: yarn bazel test //adev/...
@@ -113,6 +162,7 @@ jobs:
         run: yarn bazel build //adev:build --config=release
 
   publish-snapshots:
+    needs: setup
     runs-on:
       labels: ubuntu-latest
     steps:
@@ -122,15 +172,25 @@ jobs:
           cache-node-modules: true
       - name: Setup Bazel
         uses: angular/dev-infra/github-actions/bazel/setup@6f54d143077baef582d70873722166fdc040066c
-      - name: Setup Bazel RBE
-        uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (if cache miss)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile
-      - run: echo "https://${{secrets.SNAPSHOT_BUILDS_GITHUB_TOKEN}}:@github.com" > ${HOME}/.git_credentials
-      - run: yarn build
-      - run: ./scripts/ci/publish-build-artifacts.sh
+      - name: Configure git credentials
+        run: echo "https://${{secrets.SNAPSHOT_BUILDS_GITHUB_TOKEN}}:@github.com" > ${HOME}/.git_credentials
+      - name: Build packages
+        run: yarn build
+      - name: Publish build artifacts
+        run: ./scripts/ci/publish-build-artifacts.sh
 
   zone-js:
+    needs: setup
     runs-on:
       labels: ubuntu-latest-4core
     steps:
@@ -148,15 +208,25 @@ jobs:
         uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
         with:
           google_credential: ${{ secrets.RBE_TRUSTED_BUILDS_USER }}
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (if cache miss)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile
-      - run: |
+      - name: Build zone.js packages
+        run: |
           yarn bazel build \
           //packages/zone.js/bundles:zone.umd.js \
           //packages/zone.js:npm_package \
           //packages/zone.js/test/closure:closure_js \
 
-      - run: |
+      - name: Prepare zone.js build artifacts
+        run: |
           rm -Rf packages/zone.js/build
           rm -Rf packages/zone.js/test/extra/*.umd.js
 
@@ -168,16 +238,22 @@ jobs:
           cp dist/bin/packages/zone.js/npm_package/bundles/zone-patch-electron.umd.js ./packages/zone.js/test/extra/
           cp dist/bin/packages/zone.js/test/closure/zone.closure.mjs ./packages/zone.js/build/test/zone.closure.mjs
 
-        # Install
-      - run: yarn --cwd packages/zone.js install --frozen-lockfile --non-interactive
-        # Run zone.js tools tests
-      - run: yarn --cwd packages/zone.js promisefinallytest
-      - run: yarn --cwd packages/zone.js jest:test
-      - run: yarn --cwd packages/zone.js jest:nodetest
-      - run: yarn --cwd packages/zone.js vitest:test
-      - run: yarn --cwd packages/zone.js electrontest
-      - run: yarn --cwd packages/zone.js/test/typings install --frozen-lockfile --non-interactive
-      - run: yarn --cwd packages/zone.js/test/typings test
+      - name: Install zone.js dependencies and typings test dependencies
+        run: |
+          yarn --cwd packages/zone.js install --frozen-lockfile --non-interactive
+          yarn --cwd packages/zone.js/test/typings install --frozen-lockfile --non-interactive
+      - name: Run zone.js promise finally test
+        run: yarn --cwd packages/zone.js promisefinallytest
+      - name: Run zone.js jest tests
+        run: yarn --cwd packages/zone.js jest:test
+      - name: Run zone.js jest node tests
+        run: yarn --cwd packages/zone.js jest:nodetest
+      - name: Run zone.js vitest tests
+        run: yarn --cwd packages/zone.js vitest:test
+      - name: Run zone.js electron tests
+        run: yarn --cwd packages/zone.js electrontest
+      - name: Run zone.js typings tests
+        run: yarn --cwd packages/zone.js/test/typings test
 
   # saucelabs:
   #   runs-on: ubuntu-latest-4core
@@ -193,7 +269,7 @@ jobs:
   #     - uses: ./.github/actions/saucelabs-legacy
 
   adev-deploy:
-    needs: [adev]
+    needs: [adev, setup]
     if: needs.adev.result == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -203,9 +279,17 @@ jobs:
         uses: angular/dev-infra/github-actions/bazel/setup@6f54d143077baef582d70873722166fdc040066c
       - name: Setup Bazel RBE
         uses: angular/dev-infra/github-actions/bazel/configure-remote@6f54d143077baef582d70873722166fdc040066c
-      - name: Install node modules
+      - name: Restore workspace cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .angular
+          key: ${{ runner.os }}-workspace-${{ hashFiles('**/pnpm-lock.yaml', '**/package.json') }}
+      - name: Install node modules (if cache miss)
+        if: needs.setup.outputs.cache-hit != 'true'
         run: yarn install --frozen-lockfile
-      - name: Build adev to ensure it continues to work
+      - name: Build adev for deployment
         run: yarn bazel build //adev:build --full_build_adev --config=release
       - name: Deploy to firebase
         uses: ./.github/actions/deploy-docs-site
